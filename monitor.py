@@ -4,15 +4,38 @@ import subprocess, os
 import psutil, sys, time
 import functools, operator, collections
 
+procMap={}
+
 class Proc(object):
+
+    procTree={}
+    toppid=None
+
     def __init__(self, p):
         self.p=p
         self.pid=p.pid
         self.data={}
         self.prev_rchar=0.0
         self.prev_wchar=0.0
+        self.children=[]
+        self.p.cpu_percent() # prime the pump
+        self.cmdline=" ".join(p.cmdline())
 
-    def update(self):
+    @classmethod
+    def add(cls, p):
+        P=Proc(p)
+        cls.procTree[p.pid]=P
+        if p.pid != cls.toppid:
+            cls.procTree[p.ppid()].children.append(p.pid)
+
+    @classmethod
+    def dumpTree(cls, pid, level=0):
+        P=cls.procTree[pid]
+        print ("%s%s: %s" % ("\t"*level, pid, P.cmdline))
+        for pid in P.children:
+            cls.dumpTree(pid, level+1)
+        
+    def update(self, now):
         try:
             pio=self.p.io_counters()
             mem=self.p.memory_info()
@@ -23,43 +46,36 @@ class Proc(object):
             self.prev_rchar=pio.read_chars
             self.prev_wchar=pio.write_chars
 
-            self.data = {"rss": mem.rss, "vms":mem.vms, "rchar":delta_rchar, "wchar":delta_wchar, "cpu":self.p.cpu_percent(interval=0.01)}
-            return self
+            self.data = {"timestamp": now, "pid":self.pid, "rss": mem.rss, "vms":mem.vms, "rchar":delta_rchar, "wchar":delta_wchar, "cpu":self.p.cpu_percent()}
+            return self.data
         except:
             return None
 
     def __str__(self):
-        return f'{self.pid}: {self.data}'
+        return "%d: %s" % (self.pid, str(self.data))
 
 def sumDicts(dicts):
     return dict(functools.reduce(operator.add,map(collections.Counter, dicts)))
 
-def getProcs(toppid):
-    try:
-        p=psutil.Process(int(toppid))
-    except psutil.NoSuchProcess:
-        return []
-
-    procs= list(map(Proc, [p]+p.children(recursive=True)))
-    return procs
-
-def updateAll(ps):
-    return [p for p in ps if p.update()]
-
 cols=["timestamp", "pid", "cpu", "rss", "vms", "rchar", "wchar"]
 
-def dump(fp, ps):
-    now=time.time()-begintime
-    if ps:
-        for p in ps:
-            d={"timestamp":now, "pid": p.pid}
-            d.update(p.data)
+def updateProcs(fp):
+    try:
+        p=psutil.Process(int(Proc.toppid))
+    except psutil.NoSuchProcess:
+        return
+
+    procs=[p]+p.children(recursive=True)
+    for p in procs:
+        if p.pid not in Proc.procTree:
+            Proc.add(p)
+ 
+    now=(time.time()-begintime)
+    for pid, P in Proc.procTree.items():
+        d=P.update(now)
+        if d:
             fp.write("\t".join([str(d[k]) for k in cols])+'\n')
-        
-        #d={"timestamp":now, "pid": 0}
-        #d.update(sumDicts([p.data for p in ps]))
-        #fp.write("\t".join([str(d[k]) for k in cols])+'\n')
-        fp.flush()
+    fp.flush()
 
 if __name__=='__main__':
     interval=int(os.environ.get('MONITOR_INTERVAL', 5))
@@ -68,17 +84,20 @@ if __name__=='__main__':
     of.write("\t".join(cols)+'\n')
 
     begintime=time.time()
-    P=subprocess.Popen(sys.argv[1:])
-    pid=P.pid
-    ret=None
-    while ret == None:
-        ps=getProcs(pid)
-        ps=updateAll(ps)
-        dump(of, ps)
-        try:
-            ret=P.wait(timeout=interval)
-        except subprocess.TimeoutExpired:
-            pass
-    # finish up
-    exit(ret)
+    try:
+        P=subprocess.Popen(" ".join(sys.argv[1:]), shell=True)
+
+        Proc.toppid=P.pid
+        ret=None
+        while ret == None:
+            updateProcs(of)
+            try:
+                ret=P.wait(timeout=interval)
+                print("job ended ret %d" % ret)
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        # finish up
+        Proc.dumpTree(Proc.toppid)
+        exit(ret)
 
