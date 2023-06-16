@@ -4,6 +4,8 @@
 ## To install
 Create a conda env that contains python3, psutil, pandas, and matplotlib
 
+Optionally jupyter if you want to run the display code in jupyter
+
 ## To run
 
 python3 monitor.py prog arg1 arg2 arg3
